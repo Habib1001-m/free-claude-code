@@ -21,6 +21,7 @@ from core.anthropic import (
     SSEBuilder,
     ThinkTagParser,
     append_request_id,
+    iter_openai_compat_midstream_error_events,
     map_stop_reason,
 )
 from providers.base import BaseProvider, ProviderConfig
@@ -349,17 +350,10 @@ class OpenAIChatTransport(BaseProvider):
                     type(e).__name__,
                     req_tag,
                 )
-                for event in sse.close_all_blocks():
+                for event in iter_openai_compat_midstream_error_events(
+                    sse, error_message
+                ):
                     yield event
-                if sse.blocks.has_emitted_tool_block():
-                    # Avoid a second assistant text block after an emitted tool_use, which
-                    # breaks OpenAI history replay (issue #206) when Claude Code stores it.
-                    yield sse.emit_top_level_error(error_message)
-                else:
-                    for event in sse.emit_error(error_message):
-                        yield event
-                yield sse.message_delta("end_turn", 1)
-                yield sse.message_stop()
                 return
 
         # Flush remaining content

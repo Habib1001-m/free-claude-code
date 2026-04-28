@@ -9,16 +9,16 @@ from api.model_router import ModelRouter, ResolvedModel, RoutedMessagesRequest
 from api.models.anthropic import Message, MessagesRequest, Tool
 from api.services import ClaudeProxyService
 from api.web_tools import egress as web_egress
+from api.web_tools.capped_bodies import (
+    drain_httpx_response_body_capped,
+    read_httpx_response_body_capped,
+)
 from api.web_tools.egress import (
     WebFetchEgressPolicy,
     WebFetchEgressViolation,
     enforce_web_fetch_egress,
 )
-from api.web_tools.outbound import (
-    _drain_response_body_capped,
-    _read_response_body_capped,
-    _run_web_fetch,
-)
+from api.web_tools.outbound import _run_web_fetch
 from api.web_tools.request import is_web_server_tool_request
 from api.web_tools.streaming import stream_web_server_tool_response
 from config.settings import Settings
@@ -235,7 +235,7 @@ async def test_run_web_fetch_follows_redirect_when_each_hop_is_allowed():
     )
     res_ok = _aiohttp_response(200, url="http://8.8.8.8/final", body=b"hello world")
     client_cm, session = _aiohttp_client_session_patch(res_redirect, res_ok)
-    with patch("api.web_tools.outbound.ClientSession", return_value=client_cm):
+    with patch("api.web_tools.web_fetch.ClientSession", return_value=client_cm):
         out = await _run_web_fetch("http://8.8.8.8/start", _STRICT_EGRESS)
 
     assert out["data"] == "hello world"
@@ -248,7 +248,7 @@ async def test_run_web_fetch_truncates_large_body_to_byte_cap(monkeypatch):
     res_ok = _aiohttp_response(200, url="http://8.8.8.8/big", body=huge)
     client_cm, _ = _aiohttp_client_session_patch(res_ok)
     monkeypatch.setattr(web_tool_constants, "_MAX_WEB_FETCH_RESPONSE_BYTES", 100)
-    with patch("api.web_tools.outbound.ClientSession", return_value=client_cm):
+    with patch("api.web_tools.web_fetch.ClientSession", return_value=client_cm):
         out = await _run_web_fetch("http://8.8.8.8/big", _STRICT_EGRESS)
 
     assert len(out["data"]) <= 100
@@ -265,7 +265,7 @@ async def test_run_web_fetch_redirect_to_blocked_host_raises():
     )
     client_cm, session = _aiohttp_client_session_patch(res_redirect)
     with (
-        patch("api.web_tools.outbound.ClientSession", return_value=client_cm),
+        patch("api.web_tools.web_fetch.ClientSession", return_value=client_cm),
         pytest.raises(WebFetchEgressViolation),
     ):
         await _run_web_fetch("http://8.8.8.8/start", _STRICT_EGRESS)
@@ -278,7 +278,7 @@ async def test_run_web_fetch_redirect_without_location_raises():
     res_bad = _aiohttp_response(302, url="http://8.8.8.8/here", body=b"")
     client_cm, _ = _aiohttp_client_session_patch(res_bad)
     with (
-        patch("api.web_tools.outbound.ClientSession", return_value=client_cm),
+        patch("api.web_tools.web_fetch.ClientSession", return_value=client_cm),
         pytest.raises(WebFetchEgressViolation, match="missing Location"),
     ):
         await _run_web_fetch("http://8.8.8.8/here", _STRICT_EGRESS)
@@ -291,7 +291,7 @@ async def test_run_web_fetch_excess_redirects_raises():
     client_cm, _ = _aiohttp_client_session_patch(res1, res2)
     with (
         patch("api.web_tools.constants._MAX_WEB_FETCH_REDIRECTS", 1),
-        patch("api.web_tools.outbound.ClientSession", return_value=client_cm),
+        patch("api.web_tools.web_fetch.ClientSession", return_value=client_cm),
         pytest.raises(WebFetchEgressViolation, match="exceeded maximum redirects"),
     ):
         await _run_web_fetch("http://8.8.8.8/a", _STRICT_EGRESS)
@@ -558,7 +558,7 @@ async def test_read_response_body_capped_truncates_single_oversized_chunk():
     response = MagicMock()
     response.aiter_bytes = aiter_bytes
 
-    out = await _read_response_body_capped(response, cap)
+    out = await read_httpx_response_body_capped(response, cap)
     assert len(out) == cap
     assert out == b"z" * cap
 
@@ -575,7 +575,7 @@ async def test_drain_response_body_capped_stops_after_first_chunk_when_oversized
     response = MagicMock()
     response.aiter_bytes = aiter_bytes
 
-    await _drain_response_body_capped(response, cap)
+    await drain_httpx_response_body_capped(response, cap)
     assert chunk_calls["n"] == 1
 
 

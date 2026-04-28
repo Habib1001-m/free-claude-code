@@ -10,6 +10,12 @@ from typing import TYPE_CHECKING, Any
 from fastapi import FastAPI
 from loguru import logger
 
+from api.messaging_workspace import (
+    messaging_proxy_v1_url,
+    plans_directory_relative_to_workspace,
+    resolve_claude_data_dir_abs,
+    resolve_cli_workspace_abs,
+)
 from config.settings import Settings, get_settings
 from providers.registry import ProviderRegistry
 
@@ -178,22 +184,15 @@ class AppRuntime:
         from messaging.handler import ClaudeMessageHandler
         from messaging.session import SessionStore
 
-        workspace = (
-            os.path.abspath(self.settings.allowed_dir)
-            if self.settings.allowed_dir
-            else os.getcwd()
-        )
+        workspace = resolve_cli_workspace_abs(self.settings)
         os.makedirs(workspace, exist_ok=True)
 
-        data_path = os.path.abspath(self.settings.claude_workspace)
+        data_path = resolve_claude_data_dir_abs(self.settings)
         os.makedirs(data_path, exist_ok=True)
 
-        api_url = f"http://{self.settings.host}:{self.settings.port}/v1"
+        api_url = messaging_proxy_v1_url(self.settings)
         allowed_dirs = [workspace] if self.settings.allowed_dir else []
-        plans_dir_abs = os.path.abspath(
-            os.path.join(self.settings.claude_workspace, "plans")
-        )
-        plans_directory = os.path.relpath(plans_dir_abs, workspace)
+        plans_directory = plans_directory_relative_to_workspace(workspace, data_path)
         self.cli_manager = CLISessionManager(
             workspace_path=workspace,
             api_url=api_url,

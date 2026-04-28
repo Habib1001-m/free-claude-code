@@ -138,7 +138,15 @@ class MessagingPlatform(ABC):
         """
         pass
 
-    @abstractmethod
+    async def delete_messages(self, chat_id: str, message_ids: list[str]) -> None:
+        """Delete multiple messages; adapters may override for native bulk APIs."""
+        for mid in message_ids:
+            await self.delete_message(chat_id, mid)
+
+    def _messaging_limiter(self) -> Any | None:
+        """Process-scoped rate limiter from :meth:`start`, if configured."""
+        return getattr(self, "_limiter", None)
+
     async def queue_send_message(
         self,
         chat_id: str,
@@ -154,9 +162,30 @@ class MessagingPlatform(ABC):
         If fire_and_forget is True, returns None immediately.
         Otherwise, waits for the rate limiter and returns message ID.
         """
-        pass
+        limiter = self._messaging_limiter()
+        if not limiter:
+            return await self.send_message(
+                chat_id,
+                text,
+                reply_to,
+                parse_mode,
+                message_thread_id,
+            )
 
-    @abstractmethod
+        async def _send() -> str:
+            return await self.send_message(
+                chat_id,
+                text,
+                reply_to,
+                parse_mode,
+                message_thread_id,
+            )
+
+        if fire_and_forget:
+            limiter.fire_and_forget(_send)
+            return None
+        return await limiter.enqueue(_send)
+
     async def queue_edit_message(
         self,
         chat_id: str,
@@ -171,9 +200,20 @@ class MessagingPlatform(ABC):
         If fire_and_forget is True, returns immediately.
         Otherwise, waits for the rate limiter.
         """
-        pass
+        limiter = self._messaging_limiter()
+        if not limiter:
+            await self.edit_message(chat_id, message_id, text, parse_mode)
+            return
 
-    @abstractmethod
+        async def _edit() -> None:
+            await self.edit_message(chat_id, message_id, text, parse_mode)
+
+        dedup_key = f"edit:{chat_id}:{message_id}"
+        if fire_and_forget:
+            limiter.fire_and_forget(_edit, dedup_key=dedup_key)
+        else:
+            await limiter.enqueue(_edit, dedup_key=dedup_key)
+
     async def queue_delete_message(
         self,
         chat_id: str,
@@ -186,7 +226,19 @@ class MessagingPlatform(ABC):
         If fire_and_forget is True, returns immediately.
         Otherwise, waits for the rate limiter.
         """
-        pass
+        limiter = self._messaging_limiter()
+        if not limiter:
+            await self.delete_message(chat_id, message_id)
+            return
+
+        async def _delete() -> None:
+            await self.delete_message(chat_id, message_id)
+
+        dedup_key = f"del:{chat_id}:{message_id}"
+        if fire_and_forget:
+            limiter.fire_and_forget(_delete, dedup_key=dedup_key)
+        else:
+            await limiter.enqueue(_delete, dedup_key=dedup_key)
 
     async def queue_delete_messages(
         self,
@@ -195,14 +247,23 @@ class MessagingPlatform(ABC):
         *,
         fire_and_forget: bool = True,
     ) -> None:
-        """Delete many messages; default loops :meth:`queue_delete_message`.
+        """Enqueue one bulk delete via :meth:`delete_messages` (adapter may optimize)."""
+        if not message_ids:
+            return
 
-        Adapters with native bulk delete should override.
-        """
-        for mid in message_ids:
-            await self.queue_delete_message(
-                chat_id, mid, fire_and_forget=fire_and_forget
-            )
+        limiter = self._messaging_limiter()
+        if not limiter:
+            await self.delete_messages(chat_id, message_ids)
+            return
+
+        async def _bulk() -> None:
+            await self.delete_messages(chat_id, message_ids)
+
+        dedup_key = f"del_bulk:{chat_id}:{hash(tuple(message_ids))}"
+        if fire_and_forget:
+            limiter.fire_and_forget(_bulk, dedup_key=dedup_key)
+        else:
+            await limiter.enqueue(_bulk, dedup_key=dedup_key)
 
     @abstractmethod
     def on_message(

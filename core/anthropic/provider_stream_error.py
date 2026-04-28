@@ -9,6 +9,24 @@ from typing import Any
 from core.anthropic.sse import SSEBuilder
 
 
+def iter_openai_compat_midstream_error_events(
+    sse: SSEBuilder,
+    error_message: str,
+) -> Iterator[str]:
+    """Emit SSE tail after OpenAI-compat streaming fails mid-response.
+
+    When tool_use blocks were already emitted, uses a top-level error event to avoid a
+    second assistant text block (OpenAI history replay / issue #206).
+    """
+    yield from sse.close_all_blocks()
+    if sse.blocks.has_emitted_tool_block():
+        yield sse.emit_top_level_error(error_message)
+    else:
+        yield from sse.emit_error(error_message)
+    yield sse.message_delta("end_turn", 1)
+    yield sse.message_stop()
+
+
 def iter_provider_stream_error_sse_events(
     *,
     request: Any,

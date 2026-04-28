@@ -44,7 +44,7 @@ def get_validated_stream_addrinfos_for_egress(
 
     Each HTTP connect pins to only these `getaddrinfo` results so a malicious DNS
     server cannot rebind to a disallowed address between resolution and the TCP
-    connect (used by :func:`api.web_tools.outbound._run_web_fetch`).
+    connect (used by :func:`api.web_tools.web_fetch.run_web_fetch`).
     """
     parsed = urlparse(url)
     scheme = (parsed.scheme or "").lower()

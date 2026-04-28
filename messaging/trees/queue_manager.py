@@ -527,6 +527,31 @@ class TreeQueueManager:
 
         return affected
 
+    def _cancel_one_node_under_tree_lock(
+        self,
+        tree: MessageTree,
+        node_id: str,
+        *,
+        cancel_reason: str = "Cancelled by user",
+    ) -> MessageNode | None:
+        """Cancel one queued or in-progress node; caller must hold ``tree``'s lock."""
+        node = tree.get_node(node_id)
+        if not node or node.state in (MessageState.COMPLETED, MessageState.ERROR):
+            return None
+
+        if tree.is_current_node(node_id):
+            self._processor.cancel_current(tree)
+        else:
+            try:
+                tree.remove_from_queue(node_id)
+            except Exception:
+                logger.debug(
+                    "Failed to remove node from queue; will rely on state=ERROR"
+                )
+
+        tree.set_node_error_sync(node, cancel_reason)
+        return node
+
     async def cancel_tree(self, root_id: str) -> list[MessageNode]:
         """
         Cancel all queued and in-progress messages in a tree.
@@ -588,26 +613,8 @@ class TreeQueueManager:
             return []
 
         async with tree.with_lock():
-            node = tree.get_node(node_id)
-            if not node:
-                return []
-
-            if node.state in (MessageState.COMPLETED, MessageState.ERROR):
-                return []
-
-            if tree.is_current_node(node_id):
-                self._processor.cancel_current(tree)
-
-            try:
-                tree.remove_from_queue(node_id)
-            except Exception:
-                logger.debug(
-                    "Failed to remove node from queue; will rely on state=ERROR"
-                )
-
-            tree.set_node_error_sync(node, "Cancelled by user")
-
-            return [node]
+            node = self._cancel_one_node_under_tree_lock(tree, node_id)
+            return [node] if node else []
 
     async def cancel_all(self) -> list[MessageNode]:
         """Cancel all messages in all trees."""
@@ -667,22 +674,15 @@ class TreeQueueManager:
         cancelled: list[MessageNode] = []
 
         async with tree.with_lock():
-            for nid in branch_ids:
-                node = tree.get_node(nid)
-                if not node or node.state in (
-                    MessageState.COMPLETED,
-                    MessageState.ERROR,
-                ):
-                    continue
-
-                if tree.is_current_node(nid):
-                    self._processor.cancel_current(tree)
-                    tree.set_node_error_sync(node, "Cancelled by user")
-                    cancelled.append(node)
-                else:
-                    tree.remove_from_queue(nid)
-                    tree.set_node_error_sync(node, "Cancelled by user")
-                    cancelled.append(node)
+            cancelled.extend(
+                filter(
+                    None,
+                    (
+                        self._cancel_one_node_under_tree_lock(tree, nid)
+                        for nid in branch_ids
+                    ),
+                )
+            )
 
         if cancelled:
             logger.info(f"Cancelled {len(cancelled)} nodes in branch {branch_root_id}")
